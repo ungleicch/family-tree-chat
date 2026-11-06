@@ -1,0 +1,12 @@
+{
+  "name": "family-tree-chat",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "bun index.ts"
+  },
+  "dependencies": {
+    "jsonwebtoken": "^9.0.3",
+    "socket.io": "^4.8.3"
+  }
+}
