@@ -62,13 +62,30 @@ function extractToken(handshake: any): string | null {
   return match ? decodeURIComponent(match[1]) : null
 }
 
-io.use((socket, next) => {
+io.engine.on('headers', headers => { headers['X-Family-Membership-Enforced'] = '1' })
+async function currentMember(socket: any) {
+  try {
+    const response = await fetch('https://pitchblack.icu/api/auth/chat-access', {headers:{Authorization:'Bearer '+socket.data.membershipToken},signal:AbortSignal.timeout(3500)})
+    if (response.ok) return true
+  } catch {}
+  socket.disconnect(true)
+  return false
+}
+async function broadcastMembers(event: string, payload: any, except?: string) {
+  for (const socket of io.sockets.sockets.values()) if (socket.id !== except && await currentMember(socket)) socket.emit(event,payload)
+}
+io.use(async (socket, next) => {
   const token = extractToken(socket.handshake)
   if (!token) {
     return next(new Error('no token'))
   }
   try {
     const payload = jwt.verify(token, JWT_SECRET) as any
+    if (payload.purpose !== 'chat' || payload.access !== 'approved' || typeof payload.userId !== 'string' || typeof payload.email !== 'string') {
+      return next(new Error('invalid token'))
+    }
+    socket.data.membershipToken = token
+    if (!await currentMember(socket)) return next(new Error('family membership required'))
     ;(socket as any).user = {
       id: payload.userId,
       email: payload.email,
@@ -81,7 +98,7 @@ io.use((socket, next) => {
   }
 })
 
-io.on('connection', (socket) => {
+io.on('connection', async (socket) => {
   const user = (socket as any).user as ChatUser
   if (!user) {
     socket.disconnect(true)
@@ -92,9 +109,10 @@ io.on('connection', (socket) => {
   console.log(`[chat] user ${user.id} connected — online: ${onlineUsers.size}`)
 
   socket.emit('online-users', Array.from(onlineUsers.values()))
-  io.emit('user-online', user)
+  await broadcastMembers('user-online', user)
 
-  socket.on('send-message', (payload: { content: string }) => {
+  socket.on('send-message', async (payload: { content: string }) => {
+    if (!await currentMember(socket)) return
     if (!payload || typeof payload.content !== 'string' || !payload.content.trim()) return
     if (payload.content.length > 2000) return
 
@@ -107,17 +125,20 @@ io.on('connection', (socket) => {
       user,
       timestamp: new Date().toISOString(),
     }
-    io.emit('chat-message', msg)
+    await broadcastMembers('chat-message', msg)
   })
 
-  socket.on('typing', (isTyping: boolean) => {
-    socket.broadcast.emit('user-typing', { user, isTyping })
+  socket.on('typing', async (isTyping: boolean) => {
+    if (!await currentMember(socket)) return
+    await broadcastMembers('user-typing', { user, isTyping }, socket.id)
   })
 
+  const membershipTimer=setInterval(()=>{void currentMember(socket)},10000)
   socket.on('disconnect', () => {
+    clearInterval(membershipTimer)
     onlineUsers.delete(user.id)
     console.log(`[chat] user ${user.id} disconnected — online: ${onlineUsers.size}`)
-    io.emit('user-offline', user)
+    void broadcastMembers('user-offline', user)
   })
 
   socket.on('error', (err) => {
